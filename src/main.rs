@@ -1,9 +1,11 @@
 use linkme::distributed_slice;
-use migrations_mre_linkme::{load_enable_all_migrations, load_migrations, InnerMig};
+use migrations_mre_linkme::{load_enable_all_regular_migrations, load_migrations, InnerMigration};
 use minicbor::{Decode, Encode};
 use std::collections::BTreeMap;
 use std::thread::sleep;
 use std::time::Duration;
+use tracing::Level;
+use tracing_subscriber::FmtSubscriber;
 
 mod migrations;
 
@@ -17,6 +19,10 @@ const MIGRATION_CONFIG: &str = r#"
   {
     "type": "Two",
     "block_height": 5
+  },
+  {
+    "type": "One",
+    "block_height": 3
   },
   {
     "type": "Three",
@@ -34,15 +40,21 @@ pub type Storage = BTreeMap<u8, &'static str>;
 // This is the global migration registry
 // Doesn't contain any metadata
 #[distributed_slice]
-pub static MIG: [InnerMig<'static, Storage>] = [..];
+pub static MIGRATION: [InnerMigration<'static, Storage>] = [..];
 
 #[derive(Encode, Decode)]
 struct Dummy(#[n(0)] u64);
 
 fn main() {
+    let subscriber = FmtSubscriber::builder()
+        .with_max_level(Level::TRACE)
+        .finish();
+
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+
     // `v` is the active migration list
-    let mut v = load_migrations(&MIG, MIGRATION_CONFIG).unwrap();
-    // let mut v = load_enable_all_migrations(&MIG);
+    let mut v = load_migrations(&MIGRATION, MIGRATION_CONFIG).unwrap();
+    // let mut v = load_enable_all_regular_migrations(&MIGRATION);
 
     // Direct access to the migration
     println!("Migration Three is enabled? {}", v["Three"].is_enabled());
@@ -53,16 +65,17 @@ fn main() {
     //
     for i in v.values() {
         // for i in v {
-        println!("NAME: {} - DESC: {}", i.desc().0, i.desc().1);
+        println!("NAME: {} - DESC: {}", i.name(), i.description());
         println!("BLOCK HEIGHT: {}", i.metadata().block_height);
         println!("ISSUE: {:?}", i.metadata().issue);
         println!("STATUS: {}", i.status());
     }
 
     println!("Displaying migration registry info...");
-    for i in MIG {
-        let (name, desc) = i.desc();
-        println!("{name} - {desc}");
+    for i in MIGRATION {
+        let name = i.name();
+        let description = i.description();
+        println!("{name} - {description}");
     }
     println!();
 
@@ -74,7 +87,7 @@ fn main() {
 
         println!("Initializing migrations...");
         for i in v.values() {
-            i.init(&mut storage, c);
+            i.initialize(&mut storage, c);
             println!("{storage:?}");
         }
         println!("Performing update...");
@@ -85,7 +98,7 @@ fn main() {
 
         println!("Performing hotfix...");
         for i in v.values() {
-            let r = i.run(&minicbor::to_vec(&dummy).unwrap(), c);
+            let r = i.hotfix(&minicbor::to_vec(&dummy).unwrap(), c);
             if let Some(a) = r {
                 let d: Dummy = minicbor::decode(&a).unwrap();
                 println!("Hotfix result: {}", d.0);

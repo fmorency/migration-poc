@@ -3,6 +3,7 @@
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use strum::Display;
+use tracing::trace;
 
 pub type FnPtr<T> = dyn Sync + Fn(&mut T);
 pub type FnByte = fn(&[u8]) -> Option<Vec<u8>>;
@@ -25,6 +26,7 @@ impl Status {
     }
 }
 
+// TODO: Add the serde additional field dictionary
 #[derive(Debug, Deserialize)]
 pub struct Metadata {
     pub block_height: u64,
@@ -41,51 +43,77 @@ impl Default for Metadata {
 }
 
 #[derive(Clone)]
-pub struct InnerMig<'a, T> {
-    i: &'a FnPtr<T>,
-    u: &'a FnPtr<T>,
-    r: FnByte,
-    pub d: FnDesc,
+pub enum MigrationType<'a, T> {
+    Regular(RegularMigration<'a, T>),
+    Hotfix(HotfixMigration),
 }
 
-pub struct Mig<'a, T> {
-    pub mig: InnerMig<'a, T>,
+#[derive(Clone)]
+pub struct RegularMigration<'a, T> {
+    initialize_fn: &'a FnPtr<T>,
+    update_fn: &'a FnPtr<T>,
+}
+
+#[derive(Clone)]
+pub struct HotfixMigration {
+    hotfix_fn: FnByte,
+}
+
+// TODO: Split this in two (enums)
+// TODO: Use full words, i.e., "Migration" and not "Mig"
+#[derive(Clone)]
+pub struct InnerMigration<'a, T> {
+    r#type: MigrationType<'a, T>,
+    name: &'a str,
+    description: &'a str,
+}
+
+pub struct Migration<'a, T> {
+    pub migration: InnerMigration<'a, T>,
     pub metadata: Metadata,
     pub status: Status,
 }
 
-impl<'a, T> Mig<'a, T> {
-    pub const fn new(mig: InnerMig<'a, T>, metadata: Metadata, status: Status) -> Self {
+impl<'a, T> Migration<'a, T> {
+    pub const fn new(migration: InnerMigration<'a, T>, metadata: Metadata, status: Status) -> Self {
         Self {
-            mig,
+            migration,
             metadata,
             status,
         }
     }
 
     /// This function gets executed when the storage block height == the migration block height
-    pub fn init(&self, s: &mut T, h: u64) {
+    pub fn initialize(&self, storage: &mut T, h: u64) {
         if self.status == Status::Enabled && self.metadata().block_height == h {
-            (self.mig.i)(s);
+            trace!("Trying to initialize migration - {}", self.name());
+            self.migration.initialize(storage);
         }
     }
 
     /// This function gets executed when the storage block height >= the migration block height
-    pub fn update(&self, s: &mut T, h: u64) {
+    pub fn update(&self, storage: &mut T, h: u64) {
         if self.status == Status::Enabled && self.metadata().block_height >= h {
-            (self.mig.u)(s);
+            trace!("Trying to update migration - {}", self.name());
+            self.migration.update(storage);
         }
     }
 
-    pub fn run<'b>(&'b self, b: &'b [u8], h: u64) -> Option<Vec<u8>> {
+    /// This function gets executed when the storage block height == the migration block height
+    pub fn hotfix<'b>(&'b self, b: &'b [u8], h: u64) -> Option<Vec<u8>> {
         if self.status == Status::Enabled && self.metadata().block_height == h {
-            return (self.mig.r)(b);
+            trace!("Trying to execute hotfix - {}", self.name());
+            return self.migration.hotfix(b);
         }
         None
     }
 
-    pub fn desc(&self) -> (&'static str, &'static str) {
-        (self.mig.d)()
+    pub fn name(&self) -> &'a str {
+        self.migration.name()
+    }
+
+    pub fn description(&self) -> &'a str {
+        self.migration.description()
     }
 
     pub fn metadata(&self) -> &Metadata {
@@ -109,62 +137,107 @@ impl<'a, T> Mig<'a, T> {
     }
 }
 
-fn noop_b(_b: &[u8]) -> Option<Vec<u8>> {
-    None
-}
-
-impl<'a, T> InnerMig<'a, T> {
-    pub const fn new(i: &'a FnPtr<T>, u: &'a FnPtr<T>, r: FnByte, d: FnDesc) -> Self {
-        Self { i, u, r, d }
-    }
-
-    pub const fn new_run(r: FnByte, d: FnDesc) -> Self {
+impl<'a, T> InnerMigration<'a, T> {
+    pub const fn new_hotfix(hotfix_fn: FnByte, name: &'a str, description: &'a str) -> Self {
         Self {
-            i: &|_| {},
-            u: &|_| {},
-            r,
-            d,
+            r#type: MigrationType::Hotfix(HotfixMigration { hotfix_fn }),
+            name,
+            description,
         }
     }
 
-    pub const fn new_init(i: &'a FnPtr<T>, d: FnDesc) -> Self {
+    pub const fn new_initialize_update(
+        initialize_fn: &'a FnPtr<T>,
+        update_fn: &'a FnPtr<T>,
+        name: &'a str,
+        description: &'a str,
+    ) -> Self {
         Self {
-            i,
-            u: &|_| {},
-            r: noop_b,
-            d,
+            r#type: MigrationType::Regular(RegularMigration {
+                initialize_fn,
+                update_fn,
+            }),
+            name,
+            description,
         }
     }
 
-    pub const fn new_update(u: &'a FnPtr<T>, d: FnDesc) -> Self {
+    pub const fn new_initialize(
+        initialize_fn: &'a FnPtr<T>,
+        name: &'a str,
+        description: &'a str,
+    ) -> Self {
         Self {
-            i: &|_| {},
-            u,
-            r: noop_b,
-            d,
+            r#type: MigrationType::Regular(RegularMigration {
+                initialize_fn,
+                update_fn: &|_| {},
+            }),
+            name,
+            description,
         }
     }
 
-    pub const fn new_init_update(i: &'a FnPtr<T>, u: &'a FnPtr<T>, d: FnDesc) -> Self {
-        Self { i, u, r: noop_b, d }
+    pub const fn new_update(update_fn: &'a FnPtr<T>, name: &'a str, description: &'a str) -> Self {
+        Self {
+            r#type: MigrationType::Regular(RegularMigration {
+                initialize_fn: &|_| {},
+                update_fn,
+            }),
+            name,
+            description,
+        }
+    }
+
+    pub const fn name(&self) -> &'a str {
+        self.name
+    }
+
+    pub const fn description(&self) -> &'a str {
+        self.description
+    }
+
+    pub const fn r#type(&self) -> &MigrationType<'a, T> {
+        &self.r#type
     }
 
     /// This function gets executed when the storage block height == the migration block height
-    pub fn init(&self, s: &mut T) {
-        (self.i)(s);
+    pub fn initialize(&self, storage: &mut T) {
+        match &self.r#type {
+            MigrationType::Regular(migration) => (migration.initialize_fn)(storage),
+            _ => {
+                tracing::trace!(
+                    "Migration {} is not of type `Regular`, skipping",
+                    self.name()
+                )
+            }
+        }
     }
 
     /// This function gets executed when the storage block height >= the migration block height
-    pub fn update(&self, s: &mut T) {
-        (self.u)(s);
+    pub fn update(&self, storage: &mut T) {
+        match &self.r#type {
+            MigrationType::Regular(migration) => (migration.update_fn)(storage),
+            _ => {
+                tracing::trace!(
+                    "Migration {} is not of type `Regular`, skipping",
+                    self.name()
+                )
+            }
+        }
     }
 
-    pub fn desc(&self) -> (&'static str, &'static str) {
-        (self.d)()
-    }
-
-    pub fn run<'b>(&'b self, b: &'b [u8]) -> Option<Vec<u8>> {
-        (self.r)(b)
+    /// This function gets executed when the storage block height == the migration block height
+    pub fn hotfix<'b>(&'b self, b: &'b [u8]) -> Option<Vec<u8>> {
+        match &self.r#type {
+            MigrationType::Hotfix(migration) => (migration.hotfix_fn)(b),
+            _ => {
+                tracing::trace!(
+                    "Migration {} is not of type `Hotfix`, skipping",
+                    self.name()
+                );
+                None
+            }
+        }
     }
 }
 
@@ -177,17 +250,17 @@ struct IO<'a> {
 }
 
 pub fn load_migrations<'de: 'a, 'a, T: Clone>(
-    registry: &[InnerMig<'a, T>],
+    registry: &[InnerMigration<'a, T>],
     data: &'a str,
-) -> Result<BTreeMap<&'a str, Mig<'a, T>>, String> {
+) -> Result<BTreeMap<&'a str, Migration<'a, T>>, String> {
     // TODO: Do not hardcode the deserializer
     let config: Vec<IO> = serde_json::from_str(data).unwrap();
 
     // Build a BTreeMap from the linear registry
     let registry = registry
         .iter()
-        .map(|m| ((m.d)().0, m))
-        .collect::<BTreeMap<&'a str, &InnerMig<'a, T>>>();
+        .map(|m| (m.name, m))
+        .collect::<BTreeMap<&'a str, &InnerMigration<'a, T>>>();
 
     Ok(config
         .into_iter()
@@ -195,22 +268,30 @@ pub fn load_migrations<'de: 'a, 'a, T: Clone>(
             let (&k, &v) = registry
                 .get_key_value(io.r#type)
                 .ok_or_else(|| format!("Unsupported migration type {}", io.r#type))?;
-            Ok((k, Mig::new(v.clone(), io.metadata, Status::Enabled)))
+            Ok((k, Migration::new(v.clone(), io.metadata, Status::Enabled)))
         })
         .collect::<Result<BTreeMap<_, _>, String>>()?
         .into_iter()
         .collect())
 }
 
-pub fn load_enable_all_migrations<'a, T: Clone>(
-    registry: &[InnerMig<'a, T>],
-) -> BTreeMap<&'a str, Mig<'a, T>> {
+/// Enable all migrations from the registry EXCEPT the hotfix
+pub fn load_enable_all_regular_migrations<'a, T: Clone>(
+    registry: &[InnerMigration<'a, T>],
+) -> BTreeMap<&'a str, Migration<'a, T>> {
     registry
         .iter()
         .map(|m| {
             (
-                (m.d)().0,
-                Mig::new(m.clone(), Metadata::default(), Status::Enabled),
+                m.name,
+                Migration::new(
+                    m.clone(),
+                    Metadata::default(),
+                    match m.r#type {
+                        MigrationType::Regular(_) => Status::Enabled,
+                        MigrationType::Hotfix(_) => Status::Disabled,
+                    },
+                ),
             )
         })
         .collect()

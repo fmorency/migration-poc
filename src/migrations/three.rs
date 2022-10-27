@@ -1,6 +1,6 @@
-use crate::{Dummy, Storage, MIG};
+use crate::{Dummy, Storage, MIGRATION};
 use linkme::distributed_slice;
-use migrations_mre_linkme::InnerMig;
+use migrations_mre_linkme::InnerMigration;
 
 fn hotfix(b: &[u8]) -> Option<Vec<u8>> {
     let mut d: Dummy = minicbor::decode(b).ok()?;
@@ -8,9 +8,6 @@ fn hotfix(b: &[u8]) -> Option<Vec<u8>> {
     minicbor::to_vec(d).ok()
 }
 
-fn desc() -> (&'static str, &'static str) {
-    ("Three", "Some cool hotfix")
-}
-
-#[distributed_slice(MIG)]
-static THREE: InnerMig<Storage> = InnerMig::new_run(hotfix, desc);
+#[distributed_slice(MIGRATION)]
+static THREE: InnerMigration<Storage> =
+    InnerMigration::new_hotfix(hotfix, "Three", "Some cool hotfix");
