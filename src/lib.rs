@@ -1,7 +1,8 @@
 #![feature(const_mut_refs)]
 
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use serde_json::Value;
+use std::collections::{BTreeMap, HashMap};
 use strum::Display;
 use tracing::trace;
 
@@ -31,6 +32,9 @@ impl Status {
 pub struct Metadata {
     pub block_height: u64,
     pub issue: Option<String>,
+
+    #[serde(flatten)]
+    pub extra: HashMap<String, Value>,
 }
 
 impl Default for Metadata {
@@ -38,6 +42,7 @@ impl Default for Metadata {
         Self {
             block_height: 1,
             issue: None,
+            extra: HashMap::default(),
         }
     }
 }
@@ -59,8 +64,6 @@ pub struct HotfixMigration {
     hotfix_fn: FnByte,
 }
 
-// TODO: Split this in two (enums)
-// TODO: Use full words, i.e., "Migration" and not "Mig"
 #[derive(Clone)]
 pub struct InnerMigration<'a, T> {
     r#type: MigrationType<'a, T>,
